@@ -1,12 +1,12 @@
 ---
-# Run with ansible-playbook -i netbox_inventory.yml ansible-dynamic-inventory-3.yaml -u ansible -k
+# Run with ansible-playbook -i netbox_inventory.yml deploy_fabric.yaml -u ansible -k
 - hosts: "all"
   connection: network_cli
   become: no
   gather_facts: no
   vars:
-    netbox_url: http://netbox.dnet.local
-    netbox_token: d15fcf828dbd8bbcaef6da4c41b6e33ded1a7065
+    netbox_url: http://<your_netbox_url>
+    netbox_token: <your_netbox_token>
     working_folder: results
 
   tasks:

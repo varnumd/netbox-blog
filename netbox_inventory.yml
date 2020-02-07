@@ -1,14 +1,11 @@
 # netbox_inventory.yml file in YAML format
 # Example command line: ansible-inventory -v --list -i netbox_inventory.yml
 plugin: netbox
-api_endpoint: http://netbox.dnet.local
-token: d15fcf828dbd8bbcaef6da4c41b6e33ded1a7065
+api_endpoint: http://<your_netbox_url>
+token: <your_netbox_token>
 validate_certs: False
 config_context: True
 group_by:
   - device_roles
 compose:
   ansible_network_os: platform.slug
-
-#query_filters:
-#  - device_role: Leaf

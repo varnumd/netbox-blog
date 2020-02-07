@@ -6,8 +6,8 @@
     - netbox_community.ansible_modules
 
   vars:
-    netbox_url: http://netbox.dnet.local
-    netbox_token: d15fcf828dbd8bbcaef6da4c41b6e33ded1a7065
+    netbox_url: http://<your_netbox_url>
+    netbox_token: <your_netbox_token>
 
 #############################################################
 # Devices to be added to Netbox
