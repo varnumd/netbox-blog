@@ -1,0 +1,405 @@
+- name: "Deploy New Leaf Switch Pair in NetBox"
+  connection: local
+  hosts: localhost
+  gather_facts: False
+  collections:
+    - netbox_community.ansible_modules
+
+  vars:
+    netbox_url: http://netbox.dnet.local
+    netbox_token: d15fcf828dbd8bbcaef6da4c41b6e33ded1a7065
+
+#############################################################
+# Devices to be added to Netbox
+#############################################################
+
+    devices:
+      - name: "Ansible_Test_Leaf9"
+        position: 38
+        device_type: "vEOS-Lab"
+        spine1_intf: "Ethernet9"
+        spine2_intf: "Ethernet9"
+        side: left
+        bgp_asn: 65100
+        custom:
+          local_context_data:
+            side: left
+
+      - name: "Ansible_Test_Leaf10"
+        position: 37
+        device_type: "vEOS-Lab"
+        spine1_intf: "Ethernet10"
+        spine2_intf: "Ethernet10"
+        side: right
+        bgp_asn: 65100
+        custom:
+          local_context_data:
+            side: right
+  tasks:
+
+#############################################################
+# Create Site in NetBox (if applicable)
+#############################################################
+
+    - name: "Create new site"
+      netbox_site:
+        netbox_url: "{{ netbox_url }}"
+        netbox_token: "{{ netbox_token }}"
+        data:
+          name: "Ansible Test Site"
+        state: present
+      register: "site"
+
+#############################################################
+# Create Rack in Netbox (if applicable)
+#############################################################
+
+    - name: "Create new rack"
+      netbox_rack:
+        netbox_url: "{{ netbox_url }}"
+        netbox_token: "{{ netbox_token }}"
+        data:
+          name: "Ansible - Rack-One"
+          site: "{{ site.site.slug }}"
+      register: "rack_one"
+
+#############################################################
+# Create Device in NetBox
+#############################################################
+
+    - name: Create device within Netbox
+      netbox_device:
+        netbox_url: "{{ netbox_url }}"
+        netbox_token: "{{ netbox_token }}"
+        data:
+          name: "{{ item.name }}"
+          device_type: "{{ item.device_type }}"
+          device_role: "Leaf"
+          platform: eos
+          custom_fields:
+            bgp_asn: "{{ item.bgp_asn }}"
+          site: "{{ site.site.slug }}"
+          rack: "{{ rack_one.rack.name }}"
+          position: "{{ item.position }}"
+          face: front
+          status: Staged
+        state: present
+      loop: "{{ devices }}"
+      register: nb_device
+
+    #- debug: var=vars
+
+#############################################################
+# Create Underlay Loopback0 interface and assign IP
+#############################################################
+
+    - name: "Create Loopback0 intefaces"
+      netbox_device_interface:
+        netbox_url: "{{ netbox_url }}"
+        netbox_token: "{{ netbox_token }}"
+        data:
+          name: "Loopback0"
+          device: "{{ item.name }}"
+          form_factor: Virtual
+      loop: "{{ devices }}"
+    
+    - name: "Add IP to Loopback0"
+      netbox_ip_address:
+        netbox_url: "{{ netbox_url }}"
+        netbox_token: "{{ netbox_token }}"
+        data:
+          prefix: "10.0.250.0/24"
+          interface:
+            device: "{{ item.name }}"
+            name: "Loopback0"
+      loop: "{{ devices }}"
+      
+#############################################################
+# Create Overlay Loopback1 interface and assign IP
+#############################################################
+
+    - name: "Create Loopback1 intefaces"
+      netbox_device_interface:
+        netbox_url: "{{ netbox_url }}"
+        netbox_token: "{{ netbox_token }}"
+        data:
+          name: "Loopback1"
+          device: "{{ item.name }}"
+          form_factor: Virtual
+      loop: "{{ devices }}"
+
+    - name: Get a new available IP inside Loopback1 Pool
+      netbox_ip_address:
+        netbox_url: "{{ netbox_url }}"
+        netbox_token: "{{ netbox_token }}"
+        data:
+          prefix: 10.0.255.0/24
+        state: new
+      register: loopback1_address
+
+    - name: Delete the temporarily reserved IP address
+      netbox_ip_address:
+        netbox_url: "{{ netbox_url }}"
+        netbox_token: "{{ netbox_token }}"
+        data:
+          address: "{{ loopback1_address.ip_address.address }}"
+        state: absent
+
+    - name: "Add IP to Loopback1"
+      netbox_ip_address:
+        netbox_url: "{{ netbox_url }}"
+        netbox_token: "{{ netbox_token }}"
+        data:
+          address: "{{ loopback1_address.ip_address.address | ipaddr('address') | ipaddr('host')}}"
+          interface:
+            device: "{{ item.name }}"
+            name: "Loopback1"
+        state: new
+      loop: "{{ devices }}"
+
+#############################################################
+# Assign Management IP Address
+#############################################################
+    
+    - name: "Assign IP to Management1"
+      netbox_ip_address:
+        netbox_url: "{{ netbox_url }}"
+        netbox_token: "{{ netbox_token }}"
+        data:
+          prefix: "10.40.2.0/24"
+          interface:
+            device: "{{ item.name }}"
+            name: "Management1"
+      loop: "{{ devices }}"
+      register: mgmt_addresses
+
+#############################################################
+# Associate Primary IP address to device
+#############################################################
+
+    - name: "Set device primary IP"
+      netbox_device:
+        netbox_url: "{{ netbox_url }}"
+        netbox_token: "{{ netbox_token }}"
+        data:
+          name: "{{ item.item.name }}"
+          primary_ip4: "{{ item.ip_address.address }}"
+      loop: "{{ mgmt_addresses.results }}"
+
+#############################################################
+# Create MLAG Peer-Link
+#############################################################
+
+    - name: Create LAG
+      netbox_device_interface:
+        netbox_url: "{{ netbox_url }}"
+        netbox_token: "{{ netbox_token }}"
+        data:
+          device: "{{ item.name }}"
+          name: Port-channel999
+          description: mlag_peer_link
+          form_factor: Link Aggregation Group (LAG)
+          mtu: 9000
+          mgmt_only: false
+          mode: Tagged
+        state: present
+      loop: "{{ devices }}"
+
+    - name: Assign interface to parent LAG
+      netbox_device_interface:
+        netbox_url: "{{ netbox_url }}"
+        netbox_token: "{{ netbox_token }}"
+        data:
+          device: "{{ item.name }}"
+          name: Ethernet10
+          enabled: false
+          lag:
+            name: Port-channel999
+          mtu: 9000
+          mgmt_only: false
+          mode: Tagged
+        state: present
+      loop: "{{ devices }}"
+
+#############################################################
+# Allocate new P2P segment with Spine1 and Assign IPs to interfaces
+#############################################################
+
+    - name: "Allocate new P2P segment with spine1"
+      netbox_prefix:
+        netbox_url: "{{ netbox_url }}"
+        netbox_token: "{{ netbox_token }}"
+        data:
+          parent: "10.0.1.0/24"
+          prefix_length: 31
+          description: test
+        state: present
+        first_available: yes
+      loop: "{{ devices }}"
+      register: spine1_p2p
+
+    - name: "Add IP to Spine1 Interface"
+      netbox_ip_address:
+        netbox_url: "{{ netbox_url }}"
+        netbox_token: "{{ netbox_token }}"
+        data:
+          prefix: "{{ item.prefix.prefix }}"
+          interface:
+            device: "spine1"
+            name: "{{ item.item.spine1_intf }}"
+      loop: "{{ spine1_p2p.results }}"
+
+    - name: Add description to Spine1 Interface
+      netbox_device_interface:
+        netbox_url: "{{ netbox_url }}"
+        netbox_token: "{{ netbox_token }}"
+        data:
+          device: "spine1"
+          name: "{{ item.spine1_intf }}"
+          description: "{{ item.name }}"
+        state: present
+      loop: "{{ devices }}"
+
+    - name: "Add IP to Leaf Interface"
+      netbox_ip_address:
+        netbox_url: "{{ netbox_url }}"
+        netbox_token: "{{ netbox_token }}"
+        data:
+          prefix: "{{ item.prefix.prefix }}"
+          interface:
+            device: "{{ item.item.name }}"
+            name: "Ethernet11"
+      loop: "{{ spine1_p2p.results }}"
+
+    - name: Add description to Leaf Interface - Left
+      netbox_device_interface:
+        netbox_url: "{{ netbox_url }}"
+        netbox_token: "{{ netbox_token }}"
+        data:
+          device: "{{ item.name }}"
+          name: "Ethernet11"
+          description: "spine1"
+        state: present
+      loop: "{{ devices }}"
+
+#############################################################
+# Allocate new P2P segment with Spine2 and Assign IPs to interfaces
+#############################################################
+
+    - name: "Allocate new P2P segment with spine2"
+      netbox_prefix:
+        netbox_url: "{{ netbox_url }}"
+        netbox_token: "{{ netbox_token }}"
+        data:
+          parent: "10.0.2.0/24"
+          prefix_length: 31
+          description: test
+        state: present
+        first_available: yes
+      loop: "{{ devices }}"
+      register: spine2_p2p
+ 
+    - name: "Add IP to Spine2 Interface"
+      netbox_ip_address:
+        netbox_url: "{{ netbox_url }}"
+        netbox_token: "{{ netbox_token }}"
+        data:
+          prefix: "{{ item.prefix.prefix }}"
+          interface:
+            device: "spine2"
+            name: "{{ item.item.spine1_intf }}"
+      loop: "{{ spine2_p2p.results }}"  
+
+    - name: Add description to Spine2 Interface
+      netbox_device_interface:
+        netbox_url: "{{ netbox_url }}"
+        netbox_token: "{{ netbox_token }}"
+        data:
+          device: "spine2"
+          name: "{{ item.spine2_intf }}"
+          description: "{{ item.name }}"
+        state: present
+      loop: "{{ devices }}"
+
+    - name: "Add IP to Leaf Interface"
+      netbox_ip_address:
+        netbox_url: "{{ netbox_url }}"
+        netbox_token: "{{ netbox_token }}"
+        data:
+          prefix: "{{ item.prefix.prefix }}"
+          interface:
+            device: "{{ item.item.name }}"
+            name: "Ethernet12"
+      loop: "{{ spine2_p2p.results }}"
+
+    - name: Add description to Leaf Interface - Left
+      netbox_device_interface:
+        netbox_url: "{{ netbox_url }}"
+        netbox_token: "{{ netbox_token }}"
+        data:
+          device: "{{ item.name }}"
+          name: "Ethernet12"
+          description: "spine2"
+        state: present
+      loop: "{{ devices }}"
+
+#############################################################
+# Create IBGP Peering VLAN between MLAG Peers
+#############################################################
+
+    - name: "Create Vlan4091 IBGP peering intefaces"
+      netbox_device_interface:
+        netbox_url: "{{ netbox_url }}"
+        netbox_token: "{{ netbox_token }}"
+        data:
+          name: "Vlan4091"
+          device: "{{ item.name }}"
+          form_factor: Virtual
+      loop: "{{ devices }}"
+
+    - name: "Allocate new P2P segment for IBGP between Leaf-Pairs"
+      netbox_prefix:
+        netbox_url: "{{ netbox_url }}"
+        netbox_token: "{{ netbox_token }}"
+        data:
+          parent: "10.0.3.0/24"
+          prefix_length: 31
+          description: test
+        state: present
+        first_available: yes
+      loop: "{{ devices }}"
+      when: item.side == "left"
+      register: u_ibgp_p2p
+    
+    - name: "Add IP to Leaf Interface"
+      netbox_ip_address:
+        netbox_url: "{{ netbox_url }}"
+        netbox_token: "{{ netbox_token }}"
+        data:
+          prefix: "{{ u_ibgp_p2p.results[0].prefix.prefix }}"
+          interface:
+            device: "{{ item.name }}"
+            name: "Vlan4091"
+      loop: "{{ devices }}"
+
+######################################################
+
+    - name: "POST: Add Config Context into NetBox"
+      uri:
+        url: "{{ netbox_url }}/api/dcim/devices/{{ item.1.device.id }}/"
+        method: PATCH
+        return_content: "no"
+        headers:
+          accept: "application/json"
+          Authorization: "Token {{ netbox_token }}"
+        status_code: [200, 201]
+        body_format: json
+        body: |
+          {{ item.0.custom }}
+      with_nested: 
+        - "{{ devices }}"
+        - "{{ nb_device.results }}"
+      when: item.0.name == item.1.device.name
+            
+######################################################
+

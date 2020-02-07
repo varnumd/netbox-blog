@@ -1,0 +1,14 @@
+---
+# Run with ansible-playbook -i netbox_inventory.yml show_ver.yaml -u ansible -k
+- hosts: "all"
+  connection: network_cli
+  become: no
+  gather_facts: no
+
+  tasks:
+    - name: run show version
+      eos_command:
+        commands: show version
+      register: version
+
+    - debug: msg={{version}}

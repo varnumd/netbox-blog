@@ -1,0 +1,194 @@
+{% for intf in nb_interfaces.json.results %}
+interface {{ intf.name }}
+{%   if intf.description is defined %}
+   description {{ intf.description }}
+{%   endif %}
+{%   for address in nb_ips.json.results %}
+{%     if address.interface.name == intf.name %}
+   ip address {{ address.address }}
+{%       if 'Ethernet' in intf.name %}
+   no switchport
+{%       endif %}
+{%     endif %}
+{%   endfor %}
+{%   if 'mlag_peer_link' in intf.description %}
+{%     if 'Ethernet' in intf.name %}
+{%       set channel_id = intf.lag.name.split('Channel') %}
+   channel-group {{ channel_id[1] }} mode active
+{%     endif %}
+{%     if 'Port-channel' in intf.name %}
+   switchport mode trunk
+   spanning-tree link-type point-to-point
+   switchport trunk group mlag-peer   
+{%     endif %}
+{%   endif %}
+   mtu 9214
+   no shutdown
+   exit
+!
+{% endfor %}
+{#########################################################}
+{% if device_roles[0] == 'Leaf' %}
+{%   if 'left' in config_context[0].side %}
+{%     set mlag_octet = '254' %}
+{%   elif 'right' in config_context[0].side %}
+{%     set mlag_octet = '255' %}
+{%   endif %}
+{% endif %}
+
+{% if device_roles[0] == 'Leaf' %}
+vlan 4090
+   name mlag-peer
+   trunk group mlag-peer
+!
+interface vlan 4090
+   ip address 10.0.99.{{ mlag_octet }}/31
+   no autostate
+   no shutdown
+!
+no spanning-tree vlan 4090
+!
+mlag configuration
+   domain-id leafs
+   peer-link port-channel 999
+   local-interface vlan 4090
+{% if '254' in mlag_octet %}
+   peer-address 10.0.99.255
+{% elif '255' in mlag_octet %}
+   peer-address 10.0.99.254
+{% endif %}
+   no shutdown
+!
+vlan 4091
+   name mlag-ibgp
+   trunk group mlag-peer
+!
+no spanning-tree vlan 4091
+!
+interface Ethernet1
+   channel-group 1 mode active
+!
+interface Port-Channel1
+   switchport mode trunk
+   mlag 1
+!
+ip virtual-router mac-address 0000.cafe.babe
+ip virtual-router mac-address mlag-peer
+{% endif %}
+
+#########################################################
+ip routing
+{% set bgp_neighbors = [] %}
+router bgp {{ nb_device.json.results[0].custom_fields.bgp_asn }}
+{% for intf in nb_interfaces.json.results %}
+{%   if 'Loopback0' in intf.name %}
+{%     for address in nb_ips.json.results %}
+{%       if address.interface.name == intf.name %}
+   router-id {{ address.address.split('/') | first }}
+{%       endif %}
+{%     endfor %}
+{%   endif %}
+{% endfor %}
+   no bgp default ipv4-unicast
+   bgp log-neighbor-changes
+   distance bgp 20 200 200
+   maximum-paths 4 ecmp 64
+{% for intf in nb_interfaces.json.results %}
+{%   if 'Ethernet' in intf.name %}
+{%     for address in nb_ips.json.results %}
+{%       if address.interface.name == intf.name and 'spine' in intf.description %}
+   neighbor {{ address.address | ipaddr('network') }} remote-as 65000 {{ bgp_neighbors.append(address.address | ipaddr('network')) }}
+{%       elif address.interface.name == intf.name and 'leaf' in intf.description %}
+{%         if device_roles[0] == 'Spine' %}
+{%           for d in ansible_play_hosts %}
+{%             if hostvars[d].nb_device.json.results[0].name == intf.description %}
+   neighbor {{ address.address | ipaddr('next_usable') }} remote-as {{ hostvars[d].nb_device.json.results[0].custom_fields.bgp_asn }} {{ bgp_neighbors.append(address.address | ipaddr('next_usable')) }}
+{%             endif %}
+{%           endfor %}
+{%         endif %}
+{%       endif %}
+{%     endfor %}
+{%   endif %}
+{% endfor %}
+{% for intf in nb_interfaces.json.results %}
+{%   if 'Vlan4091' in intf.name %}
+{%     for address in nb_ips.json.results %}
+{%       if address.interface.name == intf.name %}
+{%         if 'left' in config_context[0].side %}
+   neighbor {{ address.address | ipaddr('next_usable') }} remote-as {{ nb_device.json.results[0].custom_fields.bgp_asn }}
+   neighbor {{ address.address | ipaddr('next_usable') }} next-hop-self {{ bgp_neighbors.append(address.address | ipaddr('next_usable')) }}
+{%         elif 'right' in config_context[0].side %}
+   neighbor {{ address.address | ipaddr('network') }} remote-as {{ nb_device.json.results[0].custom_fields.bgp_asn }}
+   neighbor {{ address.address | ipaddr('network') }} next-hop-self {{ bgp_neighbors.append(address.address | ipaddr('network')) }}
+{%         endif %}
+{%       endif %}
+{%     endfor %}
+{%   endif %}
+{% endfor %}
+   !
+   address-family ipv4
+{% for intf in nb_interfaces.json.results %}
+{%   if 'Loopback0' in intf.name %}
+{%     for address in nb_ips.json.results %}
+{%       if address.interface.name == intf.name %}
+      network {{ address.address }}
+{%       endif %}
+{%     endfor %}
+{%   endif %}
+{% endfor %}
+{% for item in bgp_neighbors %}      
+      neighbor {{ item }} activate
+{% endfor %}
+
+{#########################################################}
+
+service routing protocols model multi-agent
+!
+{% set evpn_neighbors = [] %}
+router bgp {{ nb_device.json.results[0].custom_fields.bgp_asn }}
+   neighbor evpn peer-group
+{% if 'spine' in inventory_hostname %}
+   neighbor evpn next-hop-unchanged
+{% endif %}
+   neighbor evpn update-source Loopback0
+   neighbor evpn ebgp-multihop 3
+   neighbor evpn send-community extended
+   neighbor evpn maximum-routes 12000
+{% for d in ansible_play_hosts %}
+{%   if hostvars[d].device_roles[0] == 'Leaf' %}
+{%     for address in hostvars[d].nb_ips.json.results %}
+{%       if address.interface.name == 'Loopback0' %} {{ evpn_neighbors.append({'address':address.address, 'asn':hostvars[d].nb_device.json.results[0].custom_fields.bgp_asn})}} 
+{%       endif %}
+{%     endfor %}
+{%   endif %}
+{% endfor %}
+{% if device_roles[0] == 'Leaf' %}
+{%   for item in config_context[0].evpn_neighbors %}
+   neighbor {{ item.neighbor }} peer group evpn
+   neighbor {{ item.neighbor }} remote-as {{ item.remote_as }}
+{%   endfor %}
+{% elif device_roles[0] == 'Spine' %}
+{%   for item in evpn_neighbors %}
+   neighbor {{ item.address | ipaddr('address') }} peer group evpn
+   neighbor {{ item.address | ipaddr('address') }} remote-as {{ item.asn }}
+{%   endfor %}
+{% endif %}
+   !
+   address-family evpn
+      neighbor evpn activate
+{% if device_roles[0] == 'Leaf' %}
+{%   for address in nb_ips.json.results %}
+{%     if address.interface.name == 'Loopback0' %}
+      network {{ address.address }}
+{%     endif %}
+{%   endfor %}
+!
+interface Vxlan1
+   vxlan source-interface Loopback1
+   vxlan udp-port 4789
+   vxlan learn-restrict any
+!
+{% endif %}
+
+{#########################################################}
+

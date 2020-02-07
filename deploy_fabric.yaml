@@ -1,0 +1,65 @@
+---
+# Run with ansible-playbook -i netbox_inventory.yml ansible-dynamic-inventory-3.yaml -u ansible -k
+- hosts: "all"
+  connection: network_cli
+  become: no
+  gather_facts: no
+  vars:
+    netbox_url: http://netbox.dnet.local
+    netbox_token: d15fcf828dbd8bbcaef6da4c41b6e33ded1a7065
+    working_folder: results
+
+  tasks:
+    - name: Get all devices from NetBox
+      uri:
+        url: "{{ netbox_url }}/api/dcim/devices/"
+        method: GET
+        return_content: yes
+        headers:
+          accept: "application/json"
+          Authorization: "Token {{ netbox_token }}"
+      register: nb_all_devices
+
+    - name: Get device from NetBox
+      uri:
+        url: "{{ netbox_url }}/api/dcim/devices/?name={{ inventory_hostname }}"
+        method: GET
+        return_content: yes
+        headers:
+          accept: "application/json"
+          Authorization: "Token {{ netbox_token }}"
+      register: nb_device
+
+    - name: Get device interfaces from NetBox
+      uri:
+        url: "{{ netbox_url }}/api/dcim/interfaces/?device={{ inventory_hostname }}"
+        method: GET
+        return_content: yes
+        headers:
+          accept: "application/json"
+          Authorization: "Token {{ netbox_token }}"
+      register: nb_interfaces
+
+    - name: Get device IP addresses from NetBox
+      uri:
+        url: "{{ netbox_url }}/api/ipam/ip-addresses/?device={{ inventory_hostname }}"
+        method: GET
+        return_content: yes
+        headers:
+          accept: "application/json"
+          Authorization: "Token {{ netbox_token }}"
+      register: nb_ips
+
+    - name: Create temporary folder for {{ inventory_hostname }}
+      file:
+        dest: "{{ working_folder }}/{{ inventory_hostname }}"
+        state: directory
+
+    - name: Create configuration file for {{ inventory_hostname }}
+      template:
+          src: "templates/{{ platforms[0] }}.j2"
+          dest: "{{ working_folder }}/{{ inventory_hostname }}/{{ inventory_hostname }}.conf"
+
+#    - name: DEPLOY CONFIGURATION
+#      eos_config:
+#        src: "{{ working_folder }}/{{ inventory_hostname }}/{{ inventory_hostname }}.conf"
